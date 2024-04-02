@@ -1,8 +1,13 @@
 package replace_token
 
 import (
+	"compress/gzip"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strconv"
@@ -75,7 +80,22 @@ func (c *ReplaceToken) Provision(ctx caddy.Context) error {
 
 func (c ReplaceToken) Validate() error {
 	c.Logger.Infof("Initialized with auth URL: %s", c.AuthURL)
+	if bytes, err := json.Marshal(c.Headers); err == nil {
+		c.Logger.Infof("Custom Headers: %s", string(bytes))
+	}
+	c.Logger.Infof("Cache file: %s", c.CacheFile)
 	return nil
+}
+
+func (c *ReplaceToken) RandMachineId() string {
+	bytes := make([]byte, 32)
+	_, err := rand.Read(bytes)
+	if err != nil {
+		c.Logger.Warn("Error generating random machine id: ", err)
+	}
+
+	str := hex.EncodeToString(bytes)
+	return str
 }
 
 func (c *ReplaceToken) GetTokenInfo(token string) *TokenInfo {
@@ -83,36 +103,69 @@ func (c *ReplaceToken) GetTokenInfo(token string) *TokenInfo {
 	if exists && cachedInfo.ExpiresAt > time.Now().Unix() {
 		return &cachedInfo
 	}
-	c.Logger.Infof("Cache missed or expired. Fetching new token from %s", c.AuthURL)
+	c.Logger.Info("Cache missed or expired. Fetching new token from ", c.AuthURL)
 	req, err := http.NewRequest("GET", c.AuthURL, nil)
 	if err != nil {
 		c.Logger.Warn("Error creating request: ", err)
 		return nil
 	}
 	if c.Headers != nil {
-		req.Header = c.Headers
+		for key, values := range c.Headers {
+			for _, value := range values {
+				req.Header.Add(key, value)
+			}
+		}
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	c.Logger.Debug("Auth Request: ", req.Method, req.URL, req.Header)
+	if auth := req.Header.Get("Authorization"); auth == "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	} else {
+		req.Header.Set("Authorization", fmt.Sprintf(auth, token))
+	}
+
+	if bytes, err := json.Marshal(req.Header); err == nil {
+		c.Logger.Debugf("Auth Request: %s %s %s", req.Method, req.URL, string(bytes))
+	}
 
 	client := &http.Client{}
 	resp, err := client.Do(req)
+	if bytes, err := json.Marshal(resp.Header); err == nil {
+		c.Logger.Debugf("Auth Response: %s %s", resp.Status, string(bytes))
+	}
 	if err != nil {
 		c.Logger.Warn("Error fetching token: ", err)
 		return nil
 	}
+	if resp.StatusCode != http.StatusOK || !strings.Contains(resp.Header.Get("Content-Type"), "application/json") {
+		c.Logger.Warnf("Unexpected response: %s %s %s", resp.Status, resp.Header, resp.Body)
+		return nil
+	}
 	defer resp.Body.Close()
-	c.Logger.Debug("Auth Response: ", resp.Status, resp.Header)
 
+	switch resp.Header.Get("Content-Encoding") {
+	case "gzip":
+		resp.Body, err = gzip.NewReader(resp.Body)
+		defer resp.Body.Close()
+		if err != nil {
+			c.Logger.Warn("Error decoding gzip body: ", err)
+			return nil
+		}
+	case "":
+		break
+	default:
+		c.Logger.Warn("Unsupported content encoding: ", resp.Header.Get("Content-Encoding"))
+		return nil
+	}
 	var authResponse AuthResponse
 	if err := json.NewDecoder(resp.Body).Decode(&authResponse); err != nil {
-		c.Logger.Warn("Unable to get token: ", err, ". Response: ", resp)
+		c.Logger.Warn("Failed to decode response: ", err)
+		bytes, _ := io.ReadAll(resp.Body)
+		c.Logger.Warn("Response body: ", string(bytes))
 		return nil
 	}
 	info := TokenInfo{
 		Token:     authResponse.Token,
 		ExpiresAt: authResponse.ExpiresAt,
-		MachineId: uuid.NewString(),
+		MachineId: c.RandMachineId(),
 		SessionId: uuid.NewString(),
 	}
 	if exists {
@@ -155,7 +208,9 @@ func (c *ReplaceToken) GetTokenInfo(token string) *TokenInfo {
 
 // ServeHTTP implements caddyhttp.MiddlewareHandler.
 func (c *ReplaceToken) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
-	c.Logger.Debug("Request: ", r.Method, r.URL, r.Header)
+	if bytes, err := json.Marshal(r.Header); err == nil {
+		c.Logger.Debugf("Request: %s %s %s", r.Method, r.URL, string(bytes))
+	}
 	header := r.Header.Get("Authorization")
 	if !strings.HasPrefix(header, "Bearer ") {
 		c.Logger.Warn("Missing token in request")
@@ -169,12 +224,15 @@ func (c *ReplaceToken) ServeHTTP(w http.ResponseWriter, r *http.Request, next ca
 		w.WriteHeader(http.StatusUnauthorized)
 		return nil
 	}
+	unixMillis := time.Now().UnixNano() / 1e6
 	r.Header.Set("Authorization", "Bearer "+info.Token)
 	r.Header.Set("X-Request-Id", uuid.NewString())
-	r.Header.Set("Vscode-Sessionid", info.SessionId)
+	r.Header.Set("Vscode-Sessionid", info.SessionId+strconv.FormatInt(unixMillis, 10))
 	r.Header.Set("Vscode-Machineid", info.MachineId)
 
-	c.Logger.Debug("Modified request: ", r.Method, r.URL, r.Header)
+	if bytes, err := json.Marshal(r.Header); err == nil {
+		c.Logger.Debugf("Modified request: %s %s %s", r.Method, r.URL, string(bytes))
+	}
 	return next.ServeHTTP(w, r)
 }
 
