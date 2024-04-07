@@ -19,7 +19,7 @@ jobs:
       run: go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
 
     - name: Build
-      run: ~/go/bin/xcaddy build --with github.com/izumi46/caddy-replace-token=. --with github.com/mholt/caddy-l4 --with github.com/caddy-dns/cloudflare --with github.com/WeidiDeng/caddy-cloudflare-ip --with github.com/caddyserver/replace-response --with github.com/abiosoft/caddy-yaml
+      run: ~/go/bin/xcaddy build --with github.com/izumi46/caddy-replace-token=. --with github.com/mholt/caddy-l4 --with github.com/caddy-dns/cloudflare --with github.com/WeidiDeng/caddy-cloudflare-ip --with github.com/caddyserver/replace-response --with github.com/abiosoft/caddy-yaml --with github.com/abiosoft/caddy-json-parse
 
     - name: Get Caddy Version
       id: get_version
