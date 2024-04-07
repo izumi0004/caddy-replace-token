@@ -37,9 +37,10 @@ type TokenInfo struct {
 }
 
 type ReplaceToken struct {
-	AuthURL   string      `json:"auth_url,omitempty"`
-	Headers   http.Header `json:"headers"`
-	CacheFile string      `json:"cache_file,omitempty"`
+	AuthURL      string      `json:"auth_url,omitempty"`
+	DefaultToken string      `json:"default_token,omitempty"`
+	Headers      http.Header `json:"headers"`
+	CacheFile    string      `json:"cache_file,omitempty"`
 
 	Cache  map[string]TokenInfo
 	Logger *zap.SugaredLogger
@@ -80,6 +81,9 @@ func (c *ReplaceToken) Provision(ctx caddy.Context) error {
 
 func (c ReplaceToken) Validate() error {
 	c.Logger.Infof("Initialized with auth URL: %s", c.AuthURL)
+	if c.DefaultToken != "" {
+		c.Logger.Info("Using default token")
+	}
 	if bytes, err := json.Marshal(c.Headers); err == nil {
 		c.Logger.Infof("Custom Headers: %s", string(bytes))
 	}
@@ -212,12 +216,18 @@ func (c *ReplaceToken) ServeHTTP(w http.ResponseWriter, r *http.Request, next ca
 		c.Logger.Debugf("Request: %s %s %s", r.Method, r.URL, string(bytes))
 	}
 	header := r.Header.Get("Authorization")
-	if !strings.HasPrefix(header, "Bearer ") {
-		c.Logger.Warn("Missing token in request")
-		w.WriteHeader(http.StatusUnauthorized)
-		return nil
+	var token string
+	if strings.HasPrefix(header, "Bearer ") {
+		token = header[7:]
+	} else {
+		if c.DefaultToken != "" {
+			c.Logger.Debug("Token not found, using default token")
+			token = c.DefaultToken
+		} else {
+			w.WriteHeader(http.StatusUnauthorized)
+			return nil
+		}
 	}
-	token := header[7:]
 	info := c.GetTokenInfo(token)
 	if info == nil {
 		c.Logger.Warnf("Invalid token: %s", token)
